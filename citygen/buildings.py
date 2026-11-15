@@ -1,9 +1,10 @@
 """
 Procedural building placement, conditioned on terrain.
 
-Takes the terrain generator's output and decides where buildings, roads,
-and green space go. Conditioning on terrain is what keeps buildings out of
-lakes and off cliffs.
+This stands in for the future Building Model. It's conditioned on the
+terrain output (water + slope) so buildings never end up in a lake or on a
+cliff. Swap this module for a trained model later without touching
+terrain.py or the CityGrid format.
 """
 from __future__ import annotations
 
@@ -15,32 +16,18 @@ from .city_grid import LAND_BUILDING, LAND_EMPTY, LAND_GREEN, LAND_ROAD
 CITY_ARCHETYPES = ("monocentric", "polycentric", "linear")
 
 
-# --------------------------------------------------------------------
-# Cluster centers -- where the "downtowns" sit
-# --------------------------------------------------------------------
-
 def _cluster_centers(archetype: str, size: int, num_clusters: int,
-                     rng: np.random.Generator):
-    """
-    Returns a list of (cx, cy) coordinates -- the centers that buildings
-    cluster around. The archetype decides how they're arranged.
-    """
+                      rng: np.random.Generator):
     if archetype == "monocentric":
-        # one downtown, dead center (this is Week 1's behavior)
         return [(size / 2, size / 2)]
 
     if archetype == "polycentric":
-        # TODO 1: several scattered downtowns.
-        # Return a list of num_clusters (cx, cy) tuples at random positions.
-        # Keep them away from the very edge -- sample each coordinate
-        # between size*0.15 and size*0.85 using rng.uniform(low, high).
-        # Use max(num_clusters, 1) so a caller passing 0 still gets a city.
-        return ...  # <-- YOUR CODE HERE
+        return [
+            (rng.uniform(size * 0.15, size * 0.85), rng.uniform(size * 0.15, size * 0.85))
+            for _ in range(max(num_clusters, 1))
+        ]
 
     if archetype == "linear":
-        # GIVEN: centers strung out along a random straight line, which
-        # gives the long corridor-shaped cities you see along rivers,
-        # coastlines, and highways.
         n = max(num_clusters, 3)
         angle = rng.uniform(0, np.pi)
         centers = []
@@ -53,22 +40,12 @@ def _cluster_centers(archetype: str, size: int, num_clusters: int,
     raise ValueError(f"unknown city archetype {archetype!r}, choose from {CITY_ARCHETYPES}")
 
 
-# --------------------------------------------------------------------
-# GIVEN -- road gap mask, no changes needed
-# --------------------------------------------------------------------
-
 def _road_keep_mask(size: int, rng: np.random.Generator, continuity: float) -> np.ndarray:
     """
-    A smooth random field, thresholded, deciding which candidate road cells
-    actually get built.
-
-    Why not just build every road? A perfectly complete grid reads as
-    obviously computer-generated. Blurring the noise first (rather than
-    using raw per-cell randomness) means the gaps come in connected
-    patches -- whole missing stretches of street, like a real city -- not
-    scattered single-cell holes.
-
-    Lower continuity = more and larger gaps.
+    Smooth random field thresholded to decide which candidate road cells
+    actually get built. Lower continuity = more/larger gaps in the road
+    network, so it doesn't look like a perfectly ordered, fully-connected
+    grid.
     """
     noise = rng.normal(size=(size, size)).astype(np.float32)
     noise = gaussian_filter(noise, sigma=max(size / 40, 1.0))
@@ -78,10 +55,6 @@ def _road_keep_mask(size: int, rng: np.random.Generator, continuity: float) -> n
     threshold = 1.0 - continuity
     return noise > threshold
 
-
-# --------------------------------------------------------------------
-# YOUR CODE -- generate_buildings
-# --------------------------------------------------------------------
 
 def generate_buildings(
     terrain_height: np.ndarray,
@@ -99,15 +72,20 @@ def generate_buildings(
     Returns (building_height: float32[size,size], land_use: uint8[size,size]).
 
     density: 0-1, how likely a buildable cell near a cluster center is to
-        actually become a building.
-    cluster_tightness: 0-1, how tightly buildings hug their cluster centers.
-        Low = broad soft-edged sprawl; high = sharp compact downtown cores.
-        Independent of density.
-    green_amount: 0-1, how much green space to add.
+        actually be a building.
+    cluster_tightness: 0-1, how tightly buildings hug their cluster
+        centers. Low = broad soft-edged built-up area; high = sharp,
+        compact downtown cores. Independent of density.
+    green_amount: 0-1, how much green space (parks/forest) to add.
     green_override: if True, green space is placed over the whole board
-        (buildings and roads included) except water. If False, green only
-        fills ground left empty after buildings and roads are placed.
-    road_continuity: 0-1, how complete the road grid is.
+        (buildings and roads included) except water -- at green_amount=1.0
+        this makes the entire non-water board green. If False (default),
+        green only fills ground left empty after buildings and roads are
+        placed -- at green_amount=1.0 all remaining empty ground becomes
+        green, but existing buildings/roads are untouched.
+    road_continuity: 0-1, how complete the road grid is. Lower values
+        leave gaps/missing segments so it doesn't read as a perfectly
+        ordered, fully-connected grid.
     """
     size = terrain_height.shape[0]
     rng = np.random.default_rng(seed)
@@ -118,49 +96,26 @@ def generate_buildings(
 
     centers = _cluster_centers(archetype, size, num_clusters, rng)
 
-    # Higher tightness -> smaller spread -> sharper falloff around each
-    # center. The +0.03 keeps spread above zero so the math never blows up.
+    # higher tightness -> smaller effective radius -> sharper falloff
     spread = 0.5 * (1.0 - cluster_tightness) + 0.03
 
     yy, xx = np.mgrid[0:size, 0:size]
-
-    # TODO 2: build the intensity field.
-    # intensity is "how urban is this cell", 0-1, peaking at the cluster
-    # centers. With several centers, each cell takes the STRONGEST nearby
-    # center's influence -- not the sum, which would make overlapping
-    # clusters unrealistically dense where they meet.
-    #
-    # For each (cx, cy) in centers:
-    #   dist    = distance from every cell to that center, divided by size
-    #             (same as Week 1: np.sqrt((xx - cx)**2 + (yy - cy)**2) / size)
-    #   falloff = np.exp(-dist / spread)
-    #   combine with np.maximum(intensity, falloff)
     intensity = np.zeros((size, size), dtype=np.float32)
     for cx, cy in centers:
-        ...  # <-- YOUR CODE HERE
+        dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2) / size
+        falloff = np.exp(-dist / spread)
+        intensity = np.maximum(intensity, falloff)
 
-    # TODO 3: work out where building is physically possible.
-    # Two conditions, both required:
-    #   - not water
-    #   - not too steep
-    # np.gradient(terrain_height) returns the slope in y and x. Combine
-    # them into a magnitude with np.sqrt(gx**2 + gy**2), then call a cell
-    # buildable when that magnitude is below 0.08.
-    # Remember `~` is "not" for boolean arrays.
     gy, gx = np.gradient(terrain_height)
-    slope_mag = ...  # <-- YOUR CODE HERE
-    buildable = ...  # <-- YOUR CODE HERE
+    slope_mag = np.sqrt(gx ** 2 + gy ** 2)
+    buildable = (~is_water) & (slope_mag < 0.08)
 
-    # TODO 4: pick the building cells.
-    # Same probability roll as Week 1 -- a random number per cell, compared
-    # against intensity * density -- but now ALSO requiring the cell to be
-    # buildable.
-    is_building = ...  # <-- YOUR CODE HERE
+    is_building = buildable & (rng.uniform(size=(size, size)) < intensity * density)
 
-    # GIVEN: building heights. The blur makes neighboring buildings similar
-    # in height, so you get coherent low-rise districts and tall downtown
-    # cores instead of a random jumble.
     height_noise = rng.normal(loc=1.0, scale=0.4, size=(size, size))
+    # smooth so neighboring buildings tend to have similar heights -- this
+    # is what makes adjacent short buildings a plausible "row" to merge
+    # visually later, rather than a random jumble of heights
     height_noise = gaussian_filter(height_noise, sigma=1.5)
     raw_height = np.clip(intensity * 8.0 * height_noise, 0.3, None)
     building_height = np.where(is_building, raw_height, 0.0).astype(np.float32)
@@ -168,39 +123,23 @@ def generate_buildings(
     land_use = np.full((size, size), LAND_EMPTY, dtype=np.uint8)
     land_use[is_building] = LAND_BUILDING
 
-    # TODO 5: lay down roads.
-    # Candidate road cells are every `spacing`-th row and every
-    # `spacing`-th column. A candidate actually becomes a road only if it
-    # is buildable AND still empty (don't pave over buildings) AND kept by
-    # the road_keep mask.
-    #
-    # The loop below walks the two slices for you -- rows, then columns.
-    # Inside, build `mask` from those three conditions applied to the
-    # slice, then write LAND_ROAD into the masked cells.
-    #
-    # Note the sub/assign-back dance: numpy slice assignment through a
-    # boolean mask needs the intermediate variable to write correctly.
+    # --- roads: same spacing grid as before, but with gaps ---
     road_keep = _road_keep_mask(size, rng, road_continuity)
     spacing = max(size // 16, 4)
     for axis_slice in (np.s_[::spacing, :], np.s_[:, ::spacing]):
-        mask = ...  # <-- YOUR CODE HERE
+        mask = buildable[axis_slice] & (land_use[axis_slice] == LAND_EMPTY) & road_keep[axis_slice]
         sub = land_use[axis_slice]
         sub[mask] = LAND_ROAD
         land_use[axis_slice] = sub
 
-    # TODO 6: add green space -- two different behaviors.
+    # --- green space ---
     if green_override:
-        # Override mode: green goes anywhere that isn't water, replacing
-        # buildings and roads. Set those cells to LAND_GREEN, and don't
-        # forget to zero out building_height there too -- otherwise you'd
-        # leave invisible buildings standing inside a park.
-        green_mask = ...  # <-- YOUR CODE HERE
-        ...  # <-- YOUR CODE HERE (set land_use, and clear building_height)
+        green_mask = (~is_water) & (rng.uniform(size=(size, size)) < green_amount)
+        land_use[green_mask] = LAND_GREEN
+        building_height[green_mask] = 0.0
     else:
-        # Normal mode: green only fills cells that are still LAND_EMPTY.
-        # Buildings and roads are left alone.
-        empty_mask = ...  # <-- YOUR CODE HERE
-        green_mask = ...  # <-- YOUR CODE HERE
+        empty_mask = land_use == LAND_EMPTY
+        green_mask = empty_mask & (rng.uniform(size=(size, size)) < green_amount)
         land_use[green_mask] = LAND_GREEN
 
     return building_height, land_use
