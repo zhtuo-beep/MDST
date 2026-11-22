@@ -1,3 +1,6 @@
 numpy
 scipy
 matplotlib
+# the visual interface (python app.py). Gradio 6 needs a newer huggingface-hub
+# than Intel Macs can run, so everyone stays on 5.x -- app.py works with both.
+gradio>=5.50,<6

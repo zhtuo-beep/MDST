@@ -1,0 +1,14 @@
+# Install with:  pip install -r text2city/requirements.txt
+#
+# Apple Silicon / Windows / Linux: these lines are all you need.
+torch
+scikit-learn
+sentence-transformers
+#
+# INTEL MAC ONLY -- PyTorch stops at 2.2.2 on Intel Macs. This exact set works
+# together with torch 2.2.2 AND with the app's Gradio (resolved for macOS
+# x86_64 / Python 3.11, and run-tested with these exact versions):
+#   pip install "torch==2.2.2" "numpy==1.26.4" "transformers==4.57.6" \
+#       "sentence-transformers==5.7.0" "huggingface-hub==0.36.2" "gradio==5.50.0" scikit-learn
+# (This replaces the older sentence-transformers 2.2.2 / huggingface-hub 0.16.4
+#  pins -- those are too old for Gradio. Your trained checkpoint keeps working.)
